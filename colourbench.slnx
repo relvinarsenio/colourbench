@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="colourbench.vcxproj" Id="2e4eddd6-629c-4d63-94fc-723be5a6e789" />
+</Solution>
