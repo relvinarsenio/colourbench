@@ -8,7 +8,7 @@
  * @copyright Copyright (c) 2026 Alfie Ardinata
  *
  * @details Originally written by Leonard Hecker.
- *          Modernized and refactored by Alfie Ardinata using C++23.
+ *          Modernized and rewritten by Alfie Ardinata using C++23.
  *
  * @par License
  * SPDX-License-Identifier: MIT
