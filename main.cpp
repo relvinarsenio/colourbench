@@ -157,19 +157,21 @@ struct DecimalByte final {
     return 1;
 }
 
+[[nodiscard]] constexpr auto make_decimal_byte(const std::uint32_t value) noexcept -> DecimalByte {
+    DecimalByte decimal {};
+    decimal.length = static_cast<std::uint8_t>(digit_count(value));
+
+    auto remaining = value;
+    for (auto& character : decimal.characters | std::views::take(decimal.length) | std::views::reverse) {
+        character = static_cast<char>('0' + remaining % 10U);
+        remaining /= 10U;
+    }
+    return decimal;
+}
+
 [[nodiscard]] consteval auto make_decimal_byte_table() -> std::array<DecimalByte, 256> {
     std::array<DecimalByte, 256> table {};
-
-    for (auto [value, entry] : std::views::zip(std::views::iota(0U), table)) {
-        const auto length = digit_count(value);
-        entry.length      = static_cast<std::uint8_t>(length);
-
-        auto remaining = value;
-        for (auto& character : entry.characters | std::views::take(length) | std::views::reverse) {
-            character = static_cast<char>('0' + remaining % 10U);
-            remaining /= 10U;
-        }
-    }
+    std::ranges::copy(std::views::iota(0U, 256U) | std::views::transform(make_decimal_byte), table.begin());
     return table;
 }
 
@@ -558,6 +560,25 @@ concept TerminalBackend = requires(Backend& terminal, const Backend& const_termi
     { const_terminal.interrupted() } noexcept -> std::same_as<bool>;
 };
 
+template <TerminalBackend Backend>
+[[nodiscard]] auto refresh_screen(Backend& terminal, FrameRenderer& renderer, ScreenSize& screen) -> Result<bool> {
+    const auto resized = terminal.poll_resize();
+    if (!resized) { return std::unexpected { resized.error() }; }
+    if (!*resized && screen.valid()) { return true; }
+
+    const auto size = terminal.size();
+    if (!size) { return std::unexpected { size.error() }; }
+
+    screen = *size;
+    if (!screen.valid()) {
+        std::this_thread::sleep_for(idle_poll_interval);
+        return false;
+    }
+
+    renderer.resize(screen);
+    return true;
+}
+
 template <TerminalBackend Backend> [[nodiscard]] auto run(Backend& terminal, const Options& options) -> Result<void> {
     if (!terminal.write(begin_screen)) { return fail(terminal.last_error("write"sv)); }
     const scope_exit leave_screen { [&terminal]() noexcept { static_cast<void>(terminal.write(end_screen)); } };
@@ -568,20 +589,9 @@ template <TerminalBackend Backend> [[nodiscard]] auto run(Backend& terminal, con
     std::size_t animation_frame {};
 
     while (!terminal.interrupted()) {
-        const auto resized = terminal.poll_resize();
-        if (!resized) { return std::unexpected { resized.error() }; }
-
-        if (*resized || !screen.valid()) {
-            const auto size = terminal.size();
-            if (!size) { return std::unexpected { size.error() }; }
-
-            screen = *size;
-            if (!screen.valid()) {
-                std::this_thread::sleep_for(idle_poll_interval);
-                continue;
-            }
-            renderer.resize(screen);
-        }
+        const auto ready = refresh_screen(terminal, renderer, screen);
+        if (!ready) { return std::unexpected { ready.error() }; }
+        if (!*ready) { continue; }
 
         const auto [frames_per_second, megabytes_per_second] = meter.current();
         const auto frame = renderer.render(animation_frame, frames_per_second, megabytes_per_second);
