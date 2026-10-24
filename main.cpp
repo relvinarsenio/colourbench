@@ -109,6 +109,8 @@ struct Rgb final {
     std::uint8_t red {};
     std::uint8_t green {};
     std::uint8_t blue {};
+
+    [[nodiscard]] constexpr auto operator==(const Rgb&) const noexcept -> bool = default;
 };
 
 struct Glyph final {
@@ -120,7 +122,8 @@ struct Glyph final {
 
 class ColorCount final {
 public:
-    static constexpr std::size_t maximum { 1530 };
+    static constexpr std::size_t maximum { 1U << 20 };
+    static constexpr std::size_t standard { 1530 };
 
     constexpr ColorCount() noexcept = default;
 
@@ -135,7 +138,7 @@ private:
     explicit constexpr ColorCount(const std::size_t value) noexcept
         : value_ { value } {}
 
-    std::size_t value_ { maximum };
+    std::size_t value_ { standard };
 };
 
 struct Options final {
@@ -177,39 +180,54 @@ struct DecimalByte final {
 
 inline constexpr auto decimal_byte_table = make_decimal_byte_table();
 
+inline constexpr std::uint32_t wave_turn { 1U << 16 };
+
+struct WaveChannel final {
+    std::uint32_t frequency;
+    std::uint32_t drift;
+    std::uint32_t phase;
+};
+
+inline constexpr std::array wave_channels {
+    WaveChannel { 2, 1, 0 },
+    WaveChannel { 3, 1, wave_turn / 3 },
+    WaveChannel { 5, 1, wave_turn / 3 * 2 },
+};
+
+[[nodiscard]] constexpr auto triangle_wave(const std::uint32_t position) noexcept -> std::uint32_t {
+    return position < wave_turn / 2 ? position * 2 : (wave_turn - position) * 2;
+}
+
+[[nodiscard]] constexpr auto smoothstep(const std::uint32_t amount) noexcept -> std::uint32_t {
+    const std::uint64_t t       = amount;
+    const std::uint64_t squared = (t * t) >> 16;
+    return static_cast<std::uint32_t>((squared * (3ULL * wave_turn - 2ULL * t)) >> 16);
+}
+
+[[nodiscard]] constexpr auto to_byte(const std::uint32_t amount) noexcept -> std::uint8_t {
+    return static_cast<std::uint8_t>((amount * 255ULL + wave_turn / 2) / wave_turn);
+}
+
+[[nodiscard]] constexpr auto channel_value(
+    const WaveChannel channel, const std::size_t index, const std::size_t count) noexcept -> std::uint8_t {
+    const std::uint64_t scale  = std::max<std::size_t>(1, count / ColorCount::standard);
+    const std::uint64_t cycles = channel.frequency * scale + channel.drift * (scale - 1);
+    const auto position = (static_cast<std::uint64_t>(index) * wave_turn * cycles / count + channel.phase) % wave_turn;
+    return to_byte(smoothstep(triangle_wave(static_cast<std::uint32_t>(position))));
+}
+
 [[nodiscard]] constexpr auto color_at(const std::size_t index, const std::size_t count) noexcept -> Rgb {
-    const auto phase   = index * 1536 / count;
-    const auto sector  = phase / 256;
-    const auto value   = static_cast<std::uint8_t>(phase % 256);
-    const auto inverse = static_cast<std::uint8_t>(255U - value);
-
-    switch (sector) {
-        case 0:
-            return { 255, value, 0 };
-        case 1:
-            return { inverse, 255, 0 };
-        case 2:
-            return { 0, 255, value };
-        case 3:
-            return { 0, inverse, 255 };
-        case 4:
-            return { value, 0, 255 };
-        case 5:
-            return { 255, 0, inverse };
-        default:
-            std::unreachable();
-    }
+    return {
+        channel_value(wave_channels[0], index, count),
+        channel_value(wave_channels[1], index, count),
+        channel_value(wave_channels[2], index, count),
+    };
 }
 
-template <std::size_t Count> [[nodiscard]] consteval auto make_color_table() -> std::array<Rgb, Count> {
-    std::array<Rgb, Count> colors {};
-    std::ranges::copy(std::views::iota(std::size_t { 0 }, Count)
-            | std::views::transform([](const std::size_t index) { return color_at(index, Count); }),
-        colors.begin());
-    return colors;
-}
-
-inline constexpr auto default_colors = make_color_table<ColorCount::maximum>();
+static_assert(color_at(0, 1) == color_at(1, 1));
+static_assert(color_at(0, ColorCount::standard) == color_at(ColorCount::standard, ColorCount::standard));
+static_assert(color_at(0, 65536) == color_at(65536, 65536));
+static_assert(color_at(0, ColorCount::maximum) == color_at(ColorCount::maximum, ColorCount::maximum));
 
 inline constexpr auto printable_glyphs = [] consteval {
     std::array<Glyph, 94> glyphs {};
@@ -341,7 +359,7 @@ inline constexpr std::string_view usage { "Usage: colourbench [options] [num_col
                                           "  -ch=<codepoint>    Draw this specific codepoint (hex) only\n"
                                           "  -h, --help         Show this help message\n"
                                           "\n"
-                                          "num_colors is an integer from 1 to 1530 (default: 1530).\n" };
+                                          "num_colors is an integer from 1 to 1048576 (default: 1530).\n" };
 
 inline void print_usage(std::FILE* output) {
     std::print(output, "{}", usage);
@@ -359,12 +377,8 @@ public:
     explicit RainbowBuffer(const Options& options)
         : color_mode_ { options.color_mode }
         , color_count_ { options.color_count.value() } {
-        if (color_count_ == ColorCount::maximum) {
-            colors_ = default_colors;
-        } else {
-            owned_colors_ = make_colors(color_count_);
-            colors_       = owned_colors_;
-        }
+        owned_colors_ = make_colors(color_count_);
+        colors_       = owned_colors_;
 
         if (options.glyph) {
             owned_glyph_.fill(*options.glyph);
@@ -390,7 +404,8 @@ public:
         offsets_.clear();
 
         const auto entry_count       = color_count_ + columns_;
-        const auto foreground_offset = std::max<std::size_t>(1, (color_count_ + 5) / 10);
+        const auto scale             = std::max<std::size_t>(1, color_count_ / ColorCount::standard);
+        const auto foreground_offset = std::max<std::size_t>(1, (color_count_ / scale + 5) / 10);
         offsets_.reserve(entry_count + 1);
         text_.reserve(entry_count * estimated_bytes_per_cell);
 
